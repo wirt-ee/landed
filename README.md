@@ -8,6 +8,10 @@ stating whether the content you expected is really there.
 
 **Live (free, no accounts, no keys):** <https://landed.wirt.ee>
 Machine-readable docs for agents: <https://landed.wirt.ee/llms.txt>
+**MCP endpoint (one paste, no auth):** <https://landed.wirt.ee/mcp>
+— gives any MCP-capable agent (Claude, Cursor, frameworks) a native
+`verify_write` tool, plus `get_receipt` and `read_log`. See
+[MCP_README.md](MCP_README.md) for client setup.
 
 ```sh
 curl -s -X POST https://landed.wirt.ee/v1/verify \
