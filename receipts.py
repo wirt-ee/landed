@@ -26,6 +26,7 @@ import secrets
 import socket
 import sqlite3
 import ssl
+import subprocess
 import sys
 import threading
 import time
@@ -145,6 +146,40 @@ def _sign(receipt_body):
         receipt_body, sort_keys=True, separators=(",", ":")
     )
     return hmac.new(_KEY, canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+# real-time founder push on a NEVER-SEEN agent name (the adoption
+# signal). Env AGENTRECEIPTS_NEW_AGENT_NOTIFY = executable path; it
+# receives the agent name as $1. Fire-and-forget, never blocks.
+NEW_AGENT_HOOK = os.environ.get("AGENTRECEIPTS_NEW_AGENT_NOTIFY", "")
+_SEEN_AGENTS = set()
+
+
+def _init_seen_agents():
+    try:
+        with _db() as conn:
+            for (a,) in conn.execute("select distinct agent from receipts"):
+                _SEEN_AGENTS.add(a)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _notify_new_agent(agent):
+    """Push once when an unknown agent name makes its first verify.
+    Internal prefixes never trigger it."""
+    if not NEW_AGENT_HOOK or agent.startswith("landed-"):
+        return
+    if agent in _SEEN_AGENTS:
+        return
+    _SEEN_AGENTS.add(agent)
+    try:
+        subprocess.Popen([NEW_AGENT_HOOK, agent],
+                         stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+        print("new_agent: " + agent, file=sys.stderr)
+    except Exception as e:  # noqa: BLE001
+        print("new_agent_hook_error: " + repr(e), file=sys.stderr)
 
 
 def _store_receipt(receipt, note, expect):
@@ -734,10 +769,13 @@ class ReceiptsHandler(http.server.BaseHTTPRequestHandler):
         status, found, _err = verify_target(url, expect)
         receipt = build_receipt(agent, action, url, status, found)
         _store_receipt(receipt, note, expect)
+        _notify_new_agent(agent)
         self._send_json(200, receipt)
 
 
 def main():
+    _ensure_storage()
+    _init_seen_agents()
     import argparse
 
     parser = argparse.ArgumentParser(
