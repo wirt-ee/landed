@@ -38,6 +38,21 @@ DEFAULT_PORT = 2587
 DEFAULT_HOST = "127.0.0.1"  # loopback only; expose via a reverse proxy/tunnel
 MAX_BODY_BYTES = 256 * 1024
 MAX_REDIRECTS = 3
+# global outbound-fetch budget per hour: names are free, so per-name
+# limits alone do not bound a many-name abuser. This does.
+FETCH_BUDGET_MAX = int(os.environ.get("AGENTRECEIPTS_FETCH_BUDGET", "2000"))
+_FETCH_BUDGET = {"window": 0.0, "count": 0}
+
+
+def _budget_allow():
+    now = time.time()
+    if now - _FETCH_BUDGET["window"] > 3600:
+        _FETCH_BUDGET["window"] = now
+        _FETCH_BUDGET["count"] = 0
+    if _FETCH_BUDGET["count"] >= FETCH_BUDGET_MAX:
+        return False
+    _FETCH_BUDGET["count"] += 1
+    return True
 ROBOTS_CACHE_TTL = 300  # seconds
 DISCLAIMER = (
     "This is an early experiment in mapping demand; the public API may "
@@ -220,22 +235,55 @@ def _check_host(host):
 
 
 def _fetch_once(url, timeout):
-    """Single fetch hop. Returns (status, body, headers, error)."""
+    """Single fetch hop. Returns (status, body, headers, error).
+    Anti-rebinding: resolve ONCE, guard the resolved IPs, then connect
+    to the guarded IP with SNI/Host preserved - the DNS race window
+    between check and connect is closed."""
     parts = urllib.parse.urlsplit(url)
     if parts.scheme not in ("http", "https"):
         return None, None, None, "unsupported-scheme"
     host = parts.hostname
     if not host:
         return None, None, None, "invalid-url"
-    err = _check_host(host)
-    if err:
-        return None, None, None, err
     port = parts.port or (443 if parts.scheme == "https" else 80)
+    bare = host.strip("[]")
+    if CONFIG["allow_private"]:
+        sock = None
+        try:
+            sock = socket.create_connection((bare, port), timeout=timeout)
+        except OSError:
+            return None, None, None, "connection-failed"
+    else:
+        # resolve once; guard every resolved address; connect to a guarded one
+        try:
+            infos = socket.getaddrinfo(bare, port, proto=socket.IPPROTO_TCP)
+        except socket.gaierror:
+            try:
+                ipaddress.ip_address(bare)
+            except ValueError:
+                return None, None, None, "unresolvable-host"
+            infos = [(None, None, None, None, (bare, port))]
+        guarded = [info for info in infos
+                   if ipaddress.ip_address(info[4][0]).is_global]
+        if not guarded:
+            return None, None, None, "refused-private-address"
+        sock = None
+        last = None
+        for info in guarded:
+            try:
+                sock = socket.create_connection(info[4], timeout=timeout)
+                break
+            except OSError as e:  # noqa: BLE001
+                last = e
+        if sock is None:
+            return None, None, None, "connection-failed"
     if parts.scheme == "https":
         ctx = ssl.create_default_context()
-        conn = http.client.HTTPSConnection(host, port, timeout=timeout, context=ctx)
+        sock = ctx.wrap_socket(sock, server_hostname=bare)
+        conn = http.client.HTTPSConnection(bare, port, timeout=timeout, context=ctx)
     else:
-        conn = http.client.HTTPConnection(host, port, timeout=timeout)
+        conn = http.client.HTTPConnection(bare, port, timeout=timeout)
+    conn.sock = sock   # pinned: no second DNS resolution happens
     try:
         path = parts.path or "/"
         if parts.query:
@@ -273,6 +321,8 @@ def fetch_url(url, timeout):
     """Fetch with at most MAX_REDIRECTS hops, re-checking each hop.
 
     Returns (status, body, error); error is None on success."""
+    if not _budget_allow():
+        return None, None, "fetch-budget-exceeded"
     current = url
     for _ in range(MAX_REDIRECTS + 1):
         status, body, headers, err = _fetch_once(current, timeout)
