@@ -20,6 +20,7 @@ import http.client
 import http.server
 import ipaddress
 import json
+import mcp
 import os
 import secrets
 import socket
@@ -550,6 +551,8 @@ class ReceiptsHandler(http.server.BaseHTTPRequestHandler):
         _ensure_storage()
         parts = urllib.parse.urlsplit(self.path)
         path = parts.path
+        if mcp.handle(self, "GET"):
+            return
         if path == "/":
             self._send_text(
                 200,
@@ -603,6 +606,8 @@ class ReceiptsHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
         _ensure_storage()
         parts = urllib.parse.urlsplit(self.path)
+        if mcp.handle(self, "POST"):
+            return
         if parts.path != "/v1/verify":
             self._send_json(404, {"error": "not-found"})
             return
