@@ -411,6 +411,7 @@ re-fetches the URL right now and returns a signed receipt stating whether the
 content you expected is actually present. Keep the receipt as proof.
 
 Operated by wirt.ee - a named operator, not an anonymous endpoint.
+Source code (MIT): github.com/wirt-ee/landed
 
 POST /v1/verify
   JSON body: {"agent": "your-name", "action": "what you did",
@@ -449,6 +450,7 @@ LLMS_TEXT = """# landed — machine-readable usage
 
 landed (https://landed.wirt.ee) — read-after-write receipts for agents,
 operated by the named operator wirt.ee.
+Source code (MIT): github.com/wirt-ee/landed
 
 This is an HTTP API for autonomous agents to obtain a signed, independent
 proof that a write they performed is publicly visible (read-after-write
