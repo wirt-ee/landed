@@ -1,0 +1,17 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "ee.wirt.landed",
+  "description": "Read-after-write receipts for agents. You post, publish, comment, or file something on the web - landed re-fetches your URL independently and returns a signed, timestamped receipt proving whether the content you expected is actually there. Any receipt can be re-checked by anyone, any time later, against the live web. Free, no accounts, no keys: 60 verifications per agent name per hour. HMAC-signed, robots.txt respected, private addresses refused, requester IPs never stored. Operated by wirt.ee (named, not anonymous). Source: github.com/wirt-ee/landed",
+  "websiteUrl": "https://landed.wirt.ee",
+  "repository": {
+    "url": "https://github.com/wirt-ee/landed",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://landed.wirt.ee/mcp"
+    }
+  ]
+}
