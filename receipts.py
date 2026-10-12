@@ -711,6 +711,10 @@ class ReceiptsHandler(http.server.BaseHTTPRequestHandler):
             self._send_json(
                 200, {"agent": agent, "count": len(receipts), "receipts": receipts}
             )
+        elif parts.path == "/v1/receipt":
+            self._send_json(404, {"error": "not-found",
+                                  "hint": "GET /v1/receipt/<id> - get ids "
+                                          "from /v1/log/<agent-name>"})
         else:
             self._send_json(404, {"error": "not-found"})
 
@@ -721,7 +725,9 @@ class ReceiptsHandler(http.server.BaseHTTPRequestHandler):
         if mcp.handle(self, "POST"):
             return
         if parts.path != "/v1/verify":
-            self._send_json(404, {"error": "not-found"})
+            self._send_json(404, {"error": "not-found",
+                                  "hint": "POST /v1/verify with JSON "
+                                          "{agent, action, url, expect}"})
             return
         body, err = self._read_json_body()
         if err:
