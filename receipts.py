@@ -421,14 +421,41 @@ def verify_target(url, expect):
 # Rate limiting (per agent NAME; nothing about the requester is stored)
 # --------------------------------------------------------------------------
 
+# per-agent quota overrides (paid/privileged agents). File:
+#   <data_dir>/quota_overrides.json   {"agent-name": 600, ...}
+# Missing file = no overrides. Checked before the default limit.
+_QUOTA_OVERRIDES = {"mtime": None, "limits": {}}
+_QUOTA_LOCK = threading.Lock()   # NOT _RATE_LOCK: _rate_allow already
+                                 # holds that one - re-acquiring deadlocks
+
+
+def _quota_for(agent):
+    limit = CONFIG["rate_limit_per_hour"]
+    path = os.path.join(CONFIG["data_dir"], "quota_overrides.json")
+    try:
+        mtime = os.stat(path).st_mtime
+    except OSError:
+        return limit
+    with _QUOTA_LOCK:
+        if _QUOTA_OVERRIDES["mtime"] != mtime:
+            try:
+                with open(path) as f:
+                    _QUOTA_OVERRIDES["limits"] = json.load(f)
+                _QUOTA_OVERRIDES["mtime"] = mtime
+            except (OSError, ValueError):
+                _QUOTA_OVERRIDES["mtime"] = mtime   # bad file: keep old
+    return _QUOTA_OVERRIDES["limits"].get(agent, limit)
+
+
 def _rate_allow(agent):
     now = time.time()
     with _RATE_LOCK:
+        limit = _quota_for(agent)
         stamps = _RATE_BUCKETS.setdefault(agent, [])
         cutoff = now - 3600
         while stamps and stamps[0] < cutoff:
             stamps.pop(0)
-        if len(stamps) >= CONFIG["rate_limit_per_hour"]:
+        if len(stamps) >= limit:
             return False
         stamps.append(now)
         return True
