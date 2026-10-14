@@ -883,6 +883,12 @@ class ReceiptsHandler(http.server.BaseHTTPRequestHandler):
                         " and 'sig_ed25519', keys sorted, separators (',',"
                         " ':'), UTF-8)"
                     ),
+                    "reference_verifier": (
+                        "github.com/wirt-ee/landed - verify.py (offline) + "
+                        "test_vectors.json (byte-exact canonical vectors: "
+                        "Unicode escaping, omitted and null field "
+                        "treatment, a tampered receipt that must fail)"
+                    ),
                     "operator": "wirt.ee",
                 },
             )

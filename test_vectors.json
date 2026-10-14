@@ -1,0 +1,100 @@
+{
+ "description": "Fixed test vectors for landed receipt verification (sig_ed25519). Byte-exact canonical bytes are pinned per vector so any runtime can diff against them without inferring JSON details from prose.",
+ "canonical_form": "json.dumps(receipt minus 'sig' and 'sig_ed25519', sort_keys=True, separators=(',',':')) encoded UTF-8",
+ "field_treatment": {
+  "sig_fields": "'sig' (HMAC, operator-only) and 'sig_ed25519' are dropped before canonicalization; every other field is signed exactly as present.",
+  "omitted": "An absent field is simply absent from the canonical bytes (e.g. fetch-error receipts carry no digest/final_url).",
+  "null": "A JSON null field is serialized as null and IS signed. The service emits no null fields today; this vector is an algorithmic pin for runtimes that re-serialize.",
+  "unicode": "Non-ASCII characters are escaped as \\uXXXX in the canonical bytes (Python json.dumps default, ensure_ascii=True). The unicode-fields vector pins this byte-exactly; runtimes that emit raw UTF-8 will diff there. Compare against canonical_bytes before trusting a signature check."
+ },
+ "test_keypair_note": "The private key below signs ONLY these vectors. It is not, and must never be, a landed service key.",
+ "test_private_key": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+ "pubkey": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+ "vectors": [
+  {
+   "name": "unicode-fields",
+   "valid": true,
+   "receipt": {
+    "ok": true,
+    "agent": "λ-agent",
+    "action": "posted — 中文 reply",
+    "url": "https://example.com/ü",
+    "checked_at": "2026-10-14T13:00:00+00:00",
+    "status": 200,
+    "found": true,
+    "receipt_id": "a1b2c3d4e5f60718",
+    "digest": "f6d3000000000000000000000000000000000000000000000000000000000000",
+    "sig_ed25519": "9186eef7413f4c1f367151d5db77c5f302051d5e74ce8e452652c325576c22cda10890ce4b11b2cbc86f6d3576ffed1a9ea64eee0a78c5649d93b3c76111480b"
+   },
+   "canonical_bytes": "{\"action\":\"posted \\u2014 \\u4e2d\\u6587 reply\",\"agent\":\"\\u03bb-agent\",\"checked_at\":\"2026-10-14T13:00:00+00:00\",\"digest\":\"f6d3000000000000000000000000000000000000000000000000000000000000\",\"found\":true,\"ok\":true,\"receipt_id\":\"a1b2c3d4e5f60718\",\"status\":200,\"url\":\"https://example.com/\\u00fc\"}"
+  },
+  {
+   "name": "omitted-fields-fetch-error",
+   "valid": true,
+   "receipt": {
+    "ok": false,
+    "agent": "plain-agent",
+    "action": "posted",
+    "url": "https://example.com/x",
+    "checked_at": "2026-10-14T13:01:00+00:00",
+    "status": "error:timeout",
+    "found": false,
+    "receipt_id": "0123456789abcdef",
+    "sig_ed25519": "a8e19a8e14a6cb9ed8b8543ae1612c02f0993d9495f69c55568cca496e1579707049c9dbccc839aad48bc952d13b3148a544ee47efbf34050baf322bd2e84b0c"
+   },
+   "canonical_bytes": "{\"action\":\"posted\",\"agent\":\"plain-agent\",\"checked_at\":\"2026-10-14T13:01:00+00:00\",\"found\":false,\"ok\":false,\"receipt_id\":\"0123456789abcdef\",\"status\":\"error:timeout\",\"url\":\"https://example.com/x\"}"
+  },
+  {
+   "name": "explicit-null-field",
+   "valid": true,
+   "receipt": {
+    "ok": true,
+    "agent": "null-agent",
+    "action": "posted",
+    "url": "https://example.com/",
+    "checked_at": "2026-10-14T13:02:00+00:00",
+    "status": 200,
+    "found": true,
+    "receipt_id": "ffffffffffffffff",
+    "note": null,
+    "sig_ed25519": "d59f53546bbe5761ec80e41b94628203e18de9e3e9a96fc78f00d33946656faada55ecd72654a2f1f658ff00f0f0623e77e7b8e9fdabb8a3661d24346e08fe04"
+   },
+   "canonical_bytes": "{\"action\":\"posted\",\"agent\":\"null-agent\",\"checked_at\":\"2026-10-14T13:02:00+00:00\",\"found\":true,\"note\":null,\"ok\":true,\"receipt_id\":\"ffffffffffffffff\",\"status\":200,\"url\":\"https://example.com/\"}"
+  },
+  {
+   "name": "redirect-final-url",
+   "valid": true,
+   "receipt": {
+    "ok": true,
+    "agent": "redirect-agent",
+    "action": "posted",
+    "url": "https://example.com/from",
+    "checked_at": "2026-10-14T13:03:00+00:00",
+    "status": 200,
+    "found": true,
+    "receipt_id": "feedfacefeedface",
+    "digest": "abababababababababababababababababababababababababababababababab",
+    "final_url": "https://example.com/to",
+    "sig_ed25519": "02a2f7a626e850286eb1f346e61329d299d70f212d226b698f50366270bd58c7120a013b4571f3c9145eeffa63b118a35d0778f2abbaf702efe231177869af0d"
+   },
+   "canonical_bytes": "{\"action\":\"posted\",\"agent\":\"redirect-agent\",\"checked_at\":\"2026-10-14T13:03:00+00:00\",\"digest\":\"abababababababababababababababababababababababababababababababab\",\"final_url\":\"https://example.com/to\",\"found\":true,\"ok\":true,\"receipt_id\":\"feedfacefeedface\",\"status\":200,\"url\":\"https://example.com/from\"}"
+  },
+  {
+   "name": "tampered-found-flip",
+   "valid": false,
+   "receipt": {
+    "action": "posted — 中文 reply",
+    "agent": "λ-agent",
+    "checked_at": "2026-10-14T13:00:00+00:00",
+    "digest": "f6d3000000000000000000000000000000000000000000000000000000000000",
+    "found": false,
+    "ok": true,
+    "receipt_id": "a1b2c3d4e5f60718",
+    "status": 200,
+    "url": "https://example.com/ü",
+    "sig_ed25519": "9186eef7413f4c1f367151d5db77c5f302051d5e74ce8e452652c325576c22cda10890ce4b11b2cbc86f6d3576ffed1a9ea64eee0a78c5649d93b3c76111480b"
+   },
+   "canonical_bytes": "{\"action\":\"posted \\u2014 \\u4e2d\\u6587 reply\",\"agent\":\"\\u03bb-agent\",\"checked_at\":\"2026-10-14T13:00:00+00:00\",\"digest\":\"f6d3000000000000000000000000000000000000000000000000000000000000\",\"found\":false,\"ok\":true,\"receipt_id\":\"a1b2c3d4e5f60718\",\"status\":200,\"url\":\"https://example.com/\\u00fc\"}"
+  }
+ ]
+}
