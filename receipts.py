@@ -7,8 +7,10 @@ acts; the service re-fetches the target URL (honest UA, robots.txt respected,
 10s timeout, 256KB cap, max 3 redirects) and returns a signed receipt proving
 whether the write landed. Operators can audit agents via /v1/log/<agent>.
 
-Python stdlib ONLY. Storage: sqlite3. Signing: HMAC-SHA256 with a key
-generated at first start and stored next to the database.
+Python stdlib ONLY (plus `cryptography` for Ed25519). Storage: sqlite3.
+Signing: HMAC-SHA256 (verifiable only by this operator) AND Ed25519
+(verifiable by anyone via GET /v1/pubkey); both keys are generated at
+first start and stored next to the database.
 
 Privacy: no request logging, no IPs stored — receipts store only what is
 listed in the API.
@@ -32,6 +34,16 @@ import threading
 import time
 import urllib.parse
 from datetime import datetime, timezone
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    Ed25519PrivateKey,
+)
+from cryptography.hazmat.primitives.serialization import (
+    Encoding,
+    NoEncryption,
+    PrivateFormat,
+    PublicFormat,
+)
 
 VERSION = "agentreceipts/0.1"
 USER_AGENT = VERSION  # honest, identifies the service
@@ -81,6 +93,8 @@ CONFIG = {
 
 _INIT_LOCK = threading.Lock()
 _KEY = None
+_ED_KEY = None            # Ed25519 private key (loaded at start)
+_ED_PUB_HEX = None        # its public half, hex, published at /v1/pubkey
 _DB_LOCK = threading.Lock()
 _RATE_LOCK = threading.Lock()
 _ROBOTS_LOCK = threading.Lock()
@@ -102,7 +116,7 @@ def _key_path():
 
 def _ensure_storage():
     """Create the data dir, the signing key (first start only) and the DB."""
-    global _KEY
+    global _KEY, _ED_KEY, _ED_PUB_HEX
     with _INIT_LOCK:
         if _KEY is not None:
             return
@@ -116,6 +130,26 @@ def _ensure_storage():
             fd = os.open(kp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(_KEY.hex())
+        edp = os.path.join(CONFIG["data_dir"], "receipts_ed25519.key")
+        if os.path.exists(edp):
+            with open(edp, "r", encoding="utf-8") as fh:
+                _ED_KEY = Ed25519PrivateKey.from_private_bytes(
+                    bytes.fromhex(fh.read().strip())
+                )
+        else:
+            _ED_KEY = Ed25519PrivateKey.generate()
+            fd = os.open(edp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(
+                    _ED_KEY.private_bytes(
+                        Encoding.Raw, PrivateFormat.Raw, NoEncryption()
+                    ).hex()
+                )
+        _ED_PUB_HEX = (
+            _ED_KEY.public_key()
+            .public_bytes(Encoding.Raw, PublicFormat.Raw)
+            .hex()
+        )
         with _DB_LOCK:
             conn = sqlite3.connect(_db_path())
             try:
@@ -135,17 +169,42 @@ def _ensure_storage():
                     "CREATE INDEX IF NOT EXISTS idx_receipts_agent "
                     "ON receipts (agent, created_unix DESC)"
                 )
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS rechecks ("
+                    " receipt_id TEXT NOT NULL,"
+                    " checked_at TEXT NOT NULL,"
+                    " status TEXT,"
+                    " found INTEGER,"
+                    " digest TEXT,"
+                    " recheck_json TEXT NOT NULL)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_rechecks_receipt "
+                    "ON rechecks (receipt_id)"
+                )
                 conn.commit()
             finally:
                 conn.close()
 
 
+def _canonical(receipt_body):
+    """Canonical form anyone can reproduce: receipt JSON minus the
+    signature fields, keys sorted, separators (',', ':'), UTF-8."""
+    return json.dumps(receipt_body, sort_keys=True, separators=(",", ":"))
+
+
 def _sign(receipt_body):
-    """HMAC-SHA256 over the canonical JSON of the receipt (without 'sig')."""
-    canonical = json.dumps(
-        receipt_body, sort_keys=True, separators=(",", ":")
-    )
-    return hmac.new(_KEY, canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+    """HMAC-SHA256 over the canonical JSON of the receipt (without
+    signature fields). Verifiable only by this operator."""
+    return hmac.new(
+        _KEY, _canonical(receipt_body).encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+
+
+def _sign_ed(canonical):
+    """Ed25519 over the canonical bytes; anyone can verify it against
+    the public key published at GET /v1/pubkey."""
+    return _ED_KEY.sign(canonical.encode("utf-8")).hex()
 
 
 # real-time founder push on a NEVER-SEEN agent name (the adoption
@@ -355,23 +414,24 @@ def _fetch_once(url, timeout):
 def fetch_url(url, timeout):
     """Fetch with at most MAX_REDIRECTS hops, re-checking each hop.
 
-    Returns (status, body, error); error is None on success."""
+    Returns (status, body, error, final_url); error is None on success.
+    final_url is the URL actually served (after redirects)."""
     if not _budget_allow():
-        return None, None, "fetch-budget-exceeded"
+        return None, None, "fetch-budget-exceeded", None
     current = url
     for _ in range(MAX_REDIRECTS + 1):
         status, body, headers, err = _fetch_once(current, timeout)
         if err:
-            return None, None, err
+            return None, None, err, None
         if status in (301, 302, 303, 307, 308) and headers.get("location"):
             # hop budget already consumed by this iteration
             nxt = urllib.parse.urljoin(current, headers["location"])
             if urllib.parse.urlsplit(nxt).scheme not in ("http", "https"):
-                return None, None, "unsupported-scheme"
+                return None, None, "unsupported-scheme", None
             current = nxt
             continue
-        return status, body, None
-    return None, None, "too-many-redirects"
+        return status, body, None, current
+    return None, None, "too-many-redirects", None
 
 
 def _robots_blocks(url, timeout):
@@ -389,7 +449,7 @@ def _robots_blocks(url, timeout):
     if rules is None:
         robots_url = "%s://%s/robots.txt" % (parts.scheme, parts.netloc)
         rules = ([], [])
-        status, body, err = fetch_url(robots_url, timeout)
+        status, body, err, _final = fetch_url(robots_url, timeout)
         if err is None and 200 <= status < 300 and body:
             rules = _robots_txt_rules(body.decode("utf-8", "replace"))
         with _ROBOTS_LOCK:
@@ -428,19 +488,24 @@ def _robots_txt_rules(text):
 def verify_target(url, expect):
     """Fetch the target and decide whether the write landed.
 
-    Returns (status, found, error). status is an int HTTP code, or a string
-    'error:<reason>' when the fetch was refused/failed before a response."""
+    Returns (status, found, error, observation). status is an int HTTP code,
+    or a string 'error:<reason>' when the fetch was refused/failed before a
+    response. observation (None on failure) records what this service
+    actually fetched: {"digest": sha256 of the fetched bytes (capped at
+    256KB), "final_url": the URL actually served, after redirects}."""
     timeout = CONFIG["timeout"]
     if not (url.startswith("http://") or url.startswith("https://")):
-        return "error:unsupported-scheme", False, "unsupported-scheme"
+        return "error:unsupported-scheme", False, "unsupported-scheme", None
     try:
         if _robots_blocks(url, timeout):
-            return "error:blocked-by-robots", False, "blocked-by-robots"
+            return (
+                "error:blocked-by-robots", False, "blocked-by-robots", None,
+            )
     except Exception:
         pass  # robots.txt problems never block verification itself
-    status, body, err = fetch_url(url, timeout)
+    status, body, err, final_url = fetch_url(url, timeout)
     if err:
-        return "error:%s" % err, False, err
+        return "error:%s" % err, False, err, None
     text = body.decode("utf-8", "replace")
     ok_status = 200 <= status < 300
     if expect is not None:
@@ -449,7 +514,11 @@ def verify_target(url, expect):
         # No substring supplied: a landed write at minimum returns 2xx with
         # a non-empty body.
         found = ok_status and text.strip() != ""
-    return status, found, None
+    observation = {
+        "digest": hashlib.sha256(body).hexdigest(),
+        "final_url": final_url,
+    }
+    return status, found, None, observation
 
 
 # --------------------------------------------------------------------------
@@ -500,7 +569,7 @@ def _rate_allow(agent):
 # Receipts
 # --------------------------------------------------------------------------
 
-def build_receipt(agent, action, url, status, found):
+def build_receipt(agent, action, url, status, found, observation=None):
     checked_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     body = {
         "ok": bool(found),
@@ -512,8 +581,94 @@ def build_receipt(agent, action, url, status, found):
         "found": bool(found),
         "receipt_id": secrets.token_hex(8),
     }
-    body["sig"] = _sign(body)
+    if observation:
+        # what this service actually observed at checked_at (t0):
+        body["digest"] = observation["digest"]
+        if observation.get("final_url") and observation["final_url"] != url:
+            body["final_url"] = observation["final_url"]  # served here
+    canonical = _canonical(body)
+    body["sig"] = _sign(body)                 # HMAC: operator-verifiable
+    body["sig_ed25519"] = _sign_ed(canonical)  # public: GET /v1/pubkey
     return body
+
+
+def _store_recheck(receipt_id, recheck):
+    """Persist one RECHECKED event (append-only; last 20 kept/receipt)."""
+    with _DB_LOCK:
+        conn = sqlite3.connect(_db_path())
+        try:
+            conn.execute(
+                "INSERT INTO rechecks (receipt_id, checked_at, status,"
+                " found, digest, recheck_json) VALUES (?,?,?,?,?,?)",
+                (
+                    receipt_id,
+                    recheck["checked_at"],
+                    str(recheck.get("status")),
+                    int(bool(recheck["found"])),
+                    recheck.get("digest"),
+                    json.dumps(recheck),
+                ),
+            )
+            conn.execute(
+                "DELETE FROM rechecks WHERE receipt_id = ? AND rowid NOT IN"
+                " (SELECT rowid FROM rechecks WHERE receipt_id = ?"
+                " ORDER BY rowid DESC LIMIT 20)",
+                (receipt_id, receipt_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def _receipt_rechecks(receipt_id, limit=10):
+    """The stored RECHECKED events for a receipt, newest first."""
+    with _DB_LOCK:
+        conn = sqlite3.connect(_db_path())
+        try:
+            rows = conn.execute(
+                "SELECT recheck_json FROM rechecks WHERE receipt_id = ?"
+                " ORDER BY rowid DESC LIMIT ?",
+                (receipt_id, limit),
+            ).fetchall()
+        finally:
+            conn.close()
+    out = []
+    for (rj,) in rows:
+        try:
+            out.append(json.loads(rj))
+        except ValueError:
+            pass
+    return out
+
+
+def run_recheck(receipt_id):
+    """Fresh re-verification NOW for a stored receipt, persisted as a
+    RECHECKED event. Returns (recheck, history)."""
+    with _DB_LOCK:
+        conn = sqlite3.connect(_db_path())
+        try:
+            row = conn.execute(
+                "SELECT url, expect FROM receipts WHERE receipt_id = ?",
+                (receipt_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+    if not row:
+        return None, []
+    url, expect = row
+    status, found, _err, obs = verify_target(url, expect)
+    recheck = {
+        "ok": bool(found),
+        "status": status,
+        "found": bool(found),
+        "checked_at": datetime.now(timezone.utc).isoformat(
+            timespec="seconds"
+        ),
+    }
+    if obs:
+        recheck["digest"] = obs["digest"]
+    _store_recheck(receipt_id, recheck)
+    return recheck, _receipt_rechecks(receipt_id)
 
 
 DOCS_TEXT = """landed — read-after-write receipts for agents
@@ -533,17 +688,30 @@ POST /v1/verify
   Response: a receipt
   {"ok": true, "agent": "...", "action": "...", "url": "...",
    "checked_at": "ISO-8601 UTC", "status": 200, "found": true,
-   "receipt_id": "hex", "sig": "hmac-sha256 hex"}
+   "receipt_id": "hex", "digest": "sha256 hex of the fetched bytes",
+   "sig": "hmac-sha256 hex", "sig_ed25519": "ed25519 hex"}
   - "found" is true when the fetch succeeded (2xx, non-empty body) and the
     "expect" substring (if supplied) is present.
   - "status" is the HTTP status code of the fresh fetch, or the string
     "error:<reason>" when the fetch was refused or failed (private address,
     robots.txt, timeout, too many redirects, unsupported scheme, ...).
-  - "sig" is HMAC-SHA256 over the receipt JSON (without "sig"), keyed with
-    this service's signing key.
+  - "digest" is sha256 over the bytes this service fetched at checked_at
+    (capped at 256KB): it commits to what was observed at t0, so a reader
+    can tell "landed at t0" apart from "still visible at t1". "final_url"
+    is included when the target redirected.
+  - "sig" is HMAC-SHA256 over the receipt's canonical JSON (receipt minus
+    "sig"/"sig_ed25519", keys sorted) keyed with this service's signing
+    key: it proves the OPERATOR signed; only the operator can check it.
+  - "sig_ed25519" is an Ed25519 signature over the same canonical bytes:
+    ANYONE can verify it against the public key at GET /v1/pubkey.
+
+GET /v1/pubkey   -> this service's Ed25519 public key + canonical form.
 
 GET /v1/receipt/<receipt_id>   -> the stored receipt plus a fresh
-  re-verification performed right now ({"receipt": ..., "recheck": ...}).
+  re-verification performed right now. Every such recheck is persisted
+  as a timestamped RECHECKED event: {"receipt": ..., "recheck": ...,
+  "rechecks": [stored events, newest first]}. A recheck is still visible
+  to, and checkable by, anyone.
 
 GET /v1/log/<agent-name>       -> last 100 receipts for that agent.
 
@@ -583,7 +751,10 @@ Request JSON:
 Response JSON (a "receipt"):
   {"ok": bool, "agent": str, "action": str, "url": str,
    "checked_at": "ISO-8601 UTC", "status": int-or-"error:<reason>",
-   "found": bool, "receipt_id": str, "sig": "hmac-sha256 hex over receipt minus sig"}
+   "found": bool, "receipt_id": str,
+   "digest": "sha256 hex of the fetched bytes at checked_at",
+   "sig": "hmac-sha256 hex (operator-verifiable only)",
+   "sig_ed25519": "ed25519 hex - verify it yourself with GET /v1/pubkey"}
 Semantics:
   - found=true means: fresh fetch returned 2xx with non-empty body AND, if
     "expect" was supplied, that substring appeared in the fetched HTML/text.
@@ -594,7 +765,16 @@ Semantics:
 
 ## GET /v1/receipt/<receipt_id>
 Returns {"receipt": <stored receipt>, "recheck": {ok, status, found,
-checked_at}} — a brand-new fetch performed at request time.
+checked_at, digest}, "rechecks": [stored RECHECKED events, newest
+first]} — a brand-new fetch performed at request time, persisted as a
+RECHECKED event (last 20 kept per receipt).
+
+## GET /v1/pubkey
+Returns the Ed25519 public key. To verify "sig_ed25519" yourself:
+canonicalize the receipt (drop "sig" and "sig_ed25519", sort keys,
+separators (',',':'), UTF-8) and check the Ed25519 signature over those
+bytes. "sig" (HMAC) is operator-verifiable only — it proves the operator
+signed, nothing more.
 
 ## GET /v1/log/<agent-name>
 Returns {"agent": ..., "count": n, "receipts": [<last 100 receipts, newest first>]}.
@@ -681,30 +861,31 @@ class ReceiptsHandler(http.server.BaseHTTPRequestHandler):
             if receipt is None:
                 self._send_json(404, {"error": "receipt-not-found"})
                 return
-            # fresh re-verification NOW
-            status, found, _err = verify_target(receipt["url"], None)
-            # recover the original expect, if any, from the stored row
-            expect = None
-            with _DB_LOCK:
-                conn = sqlite3.connect(_db_path())
-                try:
-                    row = conn.execute(
-                        "SELECT expect FROM receipts WHERE receipt_id = ?",
-                        (receipt_id,),
-                    ).fetchone()
-                finally:
-                    conn.close()
-            if row and row[0]:
-                status, found, _err = verify_target(receipt["url"], row[0])
-            recheck = {
-                "ok": bool(found),
-                "status": status,
-                "found": bool(found),
-                "checked_at": datetime.now(timezone.utc).isoformat(
-                    timespec="seconds"
-                ),
-            }
-            self._send_json(200, {"receipt": receipt, "recheck": recheck})
+            # fresh re-verification NOW, persisted as a RECHECKED event
+            recheck, history = run_recheck(receipt_id)
+            self._send_json(
+                200,
+                {
+                    "receipt": receipt,
+                    "recheck": recheck,
+                    "rechecks": history,
+                },
+            )
+        elif path == "/v1/pubkey":
+            self._send_json(
+                200,
+                {
+                    "scheme": "ed25519",
+                    "pubkey": _ED_PUB_HEX,
+                    "what_it_verifies": (
+                        "the 'sig_ed25519' field of receipts: Ed25519 over"
+                        " the receipt's canonical JSON (receipt minus 'sig'"
+                        " and 'sig_ed25519', keys sorted, separators (',',"
+                        " ':'), UTF-8)"
+                    ),
+                    "operator": "wirt.ee",
+                },
+            )
         elif path.startswith("/v1/log/"):
             agent = urllib.parse.unquote(path[len("/v1/log/"):])
             receipts = _agent_log(agent, 100)
@@ -772,8 +953,8 @@ class ReceiptsHandler(http.server.BaseHTTPRequestHandler):
             )
             return
 
-        status, found, _err = verify_target(url, expect)
-        receipt = build_receipt(agent, action, url, status, found)
+        status, found, _err, obs = verify_target(url, expect)
+        receipt = build_receipt(agent, action, url, status, found, obs)
         _store_receipt(receipt, note, expect)
         _notify_new_agent(agent)
         self._send_json(200, receipt)

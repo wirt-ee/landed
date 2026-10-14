@@ -185,7 +185,7 @@ class TestVerify(unittest.TestCase):
         self.assertEqual(
             set(r.keys()),
             {"ok", "agent", "action", "url", "checked_at", "status",
-             "found", "receipt_id", "sig"},
+             "found", "receipt_id", "digest", "sig", "sig_ed25519"},
         )
 
     def test_found_without_expect_nonempty_2xx(self):
@@ -384,7 +384,10 @@ class TestSignature(unittest.TestCase):
         key_path = os.path.join(_TMP, "receipts.key")
         with open(key_path) as fh:
             key = bytes.fromhex(fh.read().strip())
-        body = {k: v for k, v in r.items() if k != "sig"}
+        body = {
+            k: v for k, v in r.items()
+            if k not in ("sig", "sig_ed25519")
+        }
         canonical = json.dumps(body, sort_keys=True, separators=(",", ":"))
         expected = hmac.new(key, canonical.encode(), hashlib.sha256).hexdigest()
         self.assertEqual(r["sig"], expected)
@@ -393,6 +396,45 @@ class TestSignature(unittest.TestCase):
         _, r1 = _verify("sig-agent2a", "posted", _url("/page"), expect=MARKER)
         _, r2 = _verify("sig-agent2b", "posted", _url("/gone"), expect=MARKER)
         self.assertNotEqual(r1["sig"], r2["sig"])
+
+    def test_sig_ed25519_third_party_verifiable(self):
+        # what a stranger does: pubkey from /v1/pubkey, canonical form from
+        # the docs, receipt from anywhere
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+            Ed25519PublicKey,
+        )
+        code, r = _verify("ed-agent", "posted", _url("/page"), expect=MARKER)
+        code, pk = _request("GET", "/v1/pubkey")
+        self.assertEqual(code, 200)
+        pub = Ed25519PublicKey.from_public_bytes(
+            bytes.fromhex(pk["pubkey"])
+        )
+        body = {
+            k: v for k, v in r.items()
+            if k not in ("sig", "sig_ed25519")
+        }
+        canonical = json.dumps(body, sort_keys=True, separators=(",", ":"))
+        pub.verify(
+            bytes.fromhex(r["sig_ed25519"]), canonical.encode("utf-8")
+        )  # raises on tampering
+        body["found"] = not body["found"]
+        tampered = json.dumps(body, sort_keys=True, separators=(",", ":"))
+        with self.assertRaises(Exception):
+            pub.verify(
+                bytes.fromhex(r["sig_ed25519"]),
+                tampered.encode("utf-8"),
+            )
+
+    def test_rechecks_persisted_as_events(self):
+        code, r = _verify("rc-agent", "posted", _url("/page"), expect=MARKER)
+        rid = r["receipt_id"]
+        code, out = _request("GET", "/v1/receipt/%s" % rid)
+        self.assertEqual(len(out["rechecks"]), 1)
+        self.assertIn("digest", out["rechecks"][0])
+        code, out = _request("GET", "/v1/receipt/%s" % rid)
+        self.assertEqual(len(out["rechecks"]), 2)
+        self.assertEqual(out["recheck"]["checked_at"],
+                         out["rechecks"][0]["checked_at"])
 
 
 class TestDocsAndPrivacy(unittest.TestCase):
@@ -431,8 +473,11 @@ class TestDocsAndPrivacy(unittest.TestCase):
             {"receipt_id", "agent", "action", "url", "note", "expect",
              "checked_at", "created_unix", "receipt_json"},
         )
-        # no ancillary log tables beyond receipts
+        # no ancillary log tables beyond receipts + rechecks (RECHECKED
+        # events: receipt_id, checked_at, status, found, digest — still
+        # nothing requester-derived)
         tables.remove("receipts")
+        tables.remove("rechecks")
         self.assertEqual(tables, [])
 
 

@@ -25,11 +25,21 @@ returns
 
 ```json
 {"ok": true, "found": true, "checked_at": "...",
- "receipt_id": "...", "sig": "hmac-sha256..."}
+ "receipt_id": "...", "digest": "sha256 of the fetched bytes",
+ "sig": "hmac-sha256 (operator-verifiable)",
+ "sig_ed25519": "ed25519 — verify it yourself with GET /v1/pubkey"}
 ```
 
+- `GET /v1/pubkey` — the Ed25519 public key: anyone can verify a
+  receipt's `sig_ed25519` themselves; the canonical form is documented
+  with the key. (`sig` is HMAC and proves the operator signed — nothing
+  more, nothing less.)
+- `digest` commits to the bytes the service observed at `checked_at`,
+  so a reader can tell "landed at t0" apart from "still visible at t1".
 - `GET /v1/receipt/<id>` — the stored receipt **plus a fresh
-  re-verification right now** (independent re-fetch)
+  re-verification right now** (independent re-fetch), persisted as a
+  timestamped RECHECKED event: later checks append, they never rewrite
+  the first observation
 - `GET /v1/log/<agent-name>` — last 100 receipts for that name,
   each re-checkable against the live web
 

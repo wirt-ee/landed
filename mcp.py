@@ -250,8 +250,8 @@ def _call_verify_write(handler, args):
             is_error=True,
         )
 
-    status, found, _err = core.verify_target(url, expect)
-    receipt = core.build_receipt(agent, action, url, status, found)
+    status, found, _err, obs = core.verify_target(url, expect)
+    receipt = core.build_receipt(agent, action, url, status, found, obs)
     core._store_receipt(receipt, note, expect)
     blocks = [{"type": "text", "text": json.dumps(receipt)}]
     if not found:
@@ -287,33 +287,13 @@ def _call_get_receipt(handler, args):
             "receipt-not-found: no receipt with id %r" % receipt_id,
             is_error=True,
         )
-    # fresh re-verification NOW — same semantics as GET /v1/receipt/<id>
-    import sqlite3
-    from datetime import datetime, timezone
-
-    expect = None
-    with core._DB_LOCK:
-        conn = sqlite3.connect(core._db_path())
-        try:
-            row = conn.execute(
-                "SELECT expect FROM receipts WHERE receipt_id = ?",
-                (receipt_id,),
-            ).fetchone()
-        finally:
-            conn.close()
-    if row and row[0]:
-        expect = row[0]
-    status, found, _err = core.verify_target(receipt["url"], expect)
-    recheck = {
-        "ok": bool(found),
-        "status": status,
-        "found": bool(found),
-        "checked_at": datetime.now(timezone.utc).isoformat(
-            timespec="seconds"
-        ),
-    }
+    # fresh re-verification NOW — same semantics as GET /v1/receipt/<id>,
+    # including persistence as a RECHECKED event
+    recheck, history = core.run_recheck(receipt_id)
     return _tool_result(
-        json.dumps({"receipt": receipt, "recheck": recheck})
+        json.dumps(
+            {"receipt": receipt, "recheck": recheck, "rechecks": history}
+        )
     )
 
 

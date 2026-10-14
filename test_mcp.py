@@ -43,12 +43,15 @@ DEPLOY_DIR = os.path.join(_TMP, "deployed")
 os.makedirs(DEPLOY_DIR)
 shutil.copy(os.path.join(RUN_DIR, "receipts.py"), DEPLOY_DIR)
 shutil.copy(os.path.join(RUN_DIR, "mcp.py"), DEPLOY_DIR)
-subprocess.run(
-    ["patch", "-p1", "--silent"],
-    cwd=DEPLOY_DIR,
-    stdin=open(os.path.join(RUN_DIR, "mount_mcp.patch"), "rb"),
-    check=True,
-)
+with open(os.path.join(RUN_DIR, "receipts.py")) as _fh:
+    _already_mounted = "import mcp" in _fh.read()
+if not _already_mounted:  # already-mounted source needs no patch
+    subprocess.run(
+        ["patch", "-p1", "--silent"],
+        cwd=DEPLOY_DIR,
+        stdin=open(os.path.join(RUN_DIR, "mount_mcp.patch"), "rb"),
+        check=True,
+    )
 
 sys.path.insert(0, DEPLOY_DIR)
 import receipts  # noqa: E402  (must be imported after env + sys.path setup)
