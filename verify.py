@@ -39,8 +39,10 @@ Operated by wirt.ee. Source: github.com/wirt-ee/landed (MIT).
 """
 
 import argparse
+import hashlib
 import json
 import os
+import subprocess
 import sys
 
 SIG_FIELDS = ("sig", "sig_ed25519")
@@ -97,6 +99,26 @@ def selftest():
             failures += 1
     print("selftest:", "OK - all vectors behave as pinned"
           if not failures else "%d FAILURE(S)" % failures)
+    # bind the PASS lines to the exact code + vectors exercised:
+    # file digests (always) and the git commit when run from a checkout
+    for fn in ("verify.py", "test_vectors.json"):
+        with open(os.path.join(here, fn), "rb") as fh:
+            print("  exercised: %s sha256=%s"
+                  % (fn, hashlib.sha256(fh.read()).hexdigest()))
+    try:
+        commit = subprocess.run(
+            ["git", "-C", here, "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
+        dirty = subprocess.run(
+            ["git", "-C", here, "status", "--porcelain"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
+        if commit:
+            print("  exercised: git commit %s%s"
+                  % (commit, " (dirty tree)" if dirty else " (clean)"))
+    except Exception:  # noqa: BLE001 - provenance is best-effort
+        pass
     return 0 if not failures else 1
 
 
