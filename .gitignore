@@ -1,5 +1,3 @@
-# --- secrets & key material: NEVER commit these -------------------------
-# service signing keys (receipts.key, receipts_ed25519.key), TLS material
 *.key
 *.pem
 *.p12
@@ -10,9 +8,6 @@ id_rsa*
 .env.*
 secrets.*
 *.secret
-
-# --- local state & databases ---------------------------------------------
-# the live data dir: receipts.db, quota_overrides.json, registry keys
 data/
 *.db
 *.db-journal
@@ -24,15 +19,11 @@ data/
 *.bak
 *.orig
 nohup.out
-
-# --- python ---------------------------------------------------------------
 __pycache__/
 *.pyc
 *.pyo
 .venv/
 venv/
-
-# --- editor / OS noise ------------------------------------------------------
 .DS_Store
 *.swp
 *~
